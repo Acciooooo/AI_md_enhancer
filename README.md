@@ -6,10 +6,11 @@ A lightweight Chrome / Edge (Manifest V3) extension that adds a Markdown editor 
 
 - **Expand toggle** — icon button at the top-right of DeepSeek’s input area
 - **Custom Markdown editor** — ~3× the original input height, with a live preview pane
+- **LaTeX math (KaTeX)** — inline `$E=mc^2$` and block `$$...$$`, bundled offline (no CDN)
 - **Reversed shortcuts**
   - `Enter` → newline
   - `Ctrl+Enter` / `⌘+Enter` → send
-- **Debounced preview** (500 ms) via a bundled local Markdown parser (no CDN)
+- **Debounced preview** (500 ms) via bundled Markdown + KaTeX parsers
 - **Formatting toolbar** — code block, table, heading snippets
 - **Native submit sync** — copies text into DeepSeek’s textarea, dispatches React-friendly events, then clicks the native send button
 
@@ -17,16 +18,30 @@ A lightweight Chrome / Edge (Manifest V3) extension that adds a Markdown editor 
 
 ```
 deepseek-md-enhancer/
-├── manifest.json      # MV3 extension config
-├── content.js         # UI injection, shortcuts, sync, debounce
-├── styles.css         # Isolated .md-enhancer-* styles
-├── marked.min.js      # Lightweight local Markdown → HTML parser
+├── manifest.json
+├── content.js
+├── styles.css
+├── marked.min.js
+├── katex/
+│   ├── katex.min.js
+│   ├── katex.min.css
+│   └── fonts/
 ├── icons/
-│   ├── icon16.png
-│   ├── icon48.png
-│   └── icon128.png
 └── README.md
 ```
+
+## Math examples
+
+```md
+Inline: $E = mc^2$
+
+Block:
+$$
+\int_0^1 x^2 \, dx = \frac{1}{3}
+$$
+```
+
+`$` inside fenced code blocks is left alone (not rendered as math).
 
 ## Install (Chrome)
 
@@ -54,9 +69,10 @@ deepseek-md-enhancer/
 ## Technical notes
 
 - Host permission is limited to `https://chat.deepseek.com/*`
-- Selectors prefer `textarea[placeholder*="DeepSeek"]` and DOM traversal for the send button so class-name churn is less likely to break the extension
+- Selectors prefer `textarea[placeholder*="DeepSeek"]` and DOM traversal for the send button
 - Injected UI uses the `md-enhancer-*` class prefix for CSS isolation
-- `marked.min.js` is a self-contained parser exposing `window.marked.parse()` — no remote script loading
+- `marked.min.js` and `katex/` are bundled locally — no remote script loading
+- KaTeX CSS is injected at runtime with `chrome.runtime.getURL` so font files resolve under MV3
 
 ## License
 

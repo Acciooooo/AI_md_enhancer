@@ -236,7 +236,32 @@
     }
   }
 
-  function parseMarkdown(src) {
+  /**
+   * Inject KaTeX CSS with font URLs rewritten to chrome-extension://…
+   * (content-script CSS relative font paths are unreliable in page context).
+   */
+  function ensureKatexStyles() {
+    if (document.getElementById(NS + "-katex-css")) return;
+    try {
+      const cssUrl = chrome.runtime.getURL("katex/katex.min.css");
+      const fontBase = chrome.runtime.getURL("katex/fonts/");
+      fetch(cssUrl)
+        .then((r) => r.text())
+        .then((css) => {
+          const style = document.createElement("style");
+          style.id = NS + "-katex-css";
+          style.textContent = css.replace(/url\(fonts\//g, "url(" + fontBase);
+          (document.head || document.documentElement).appendChild(style);
+        })
+        .catch(() => {
+          /* fonts may fall back; math HTML still renders */
+        });
+    } catch (_) {
+      /* ignore if chrome.runtime unavailable */
+    }
+  }
+
+  function parseMarkdownOnly(src) {
     if (typeof window.marked === "function") {
       return window.marked(src);
     }
@@ -246,9 +271,103 @@
     return "<pre>" + String(src).replace(/</g, "&lt;") + "</pre>";
   }
 
+  function renderTex(tex, displayMode) {
+    if (!window.katex || typeof window.katex.renderToString !== "function") {
+      const tag = displayMode ? "pre" : "code";
+      return (
+        "<" +
+        tag +
+        " class=\"" +
+        NS +
+        "-math-fallback\">" +
+        String(tex).replace(/&/g, "&amp;").replace(/</g, "&lt;") +
+        "</" +
+        tag +
+        ">"
+      );
+    }
+    try {
+      return window.katex.renderToString(tex, {
+        throwOnError: false,
+        displayMode: !!displayMode,
+        output: "html",
+      });
+    } catch (_) {
+      return (
+        "<code class=\"" +
+        NS +
+        "-math-error\">" +
+        String(tex).replace(/&/g, "&amp;").replace(/</g, "&lt;") +
+        "</code>"
+      );
+    }
+  }
+
+  /**
+   * Pipeline: protect code → block $$ → inline $ → marked → restore.
+   * Supports $...$ (inline) and $$...$$ (display).
+   */
+  function renderMarkdownWithMath(src) {
+    const text = String(src || "");
+    const slots = [];
+
+    function stash(html) {
+      const key = "%%MDENH" + slots.length + "%%";
+      slots.push(html);
+      return key;
+    }
+
+    // 1) Protect fenced code and inline code so $ inside them is ignored
+    let work = text.replace(/```[\s\S]*?```/g, (m) => stash(m));
+    work = work.replace(/`[^`\n]+`/g, (m) => stash(m));
+
+    // 2) Block math $$...$$ (non-greedy, multiline)
+    work = work.replace(/\$\$([\s\S]+?)\$\$/g, (_, tex) =>
+      stash(renderTex(tex.trim(), true))
+    );
+
+    // 3) Inline math $...$ (no newlines; skip \$ and $$ leftovers)
+    work = work.replace(/(^|[^\\$])\$([^\s$][^$\n]*?[^\s$]|[^\s$])\$(?!\$)/g, (_, pre, tex) =>
+      pre + stash(renderTex(tex, false))
+    );
+
+    // 4) Unescape \$ → $ for markdown pass aesthetics
+    work = work.replace(/\\\$/g, "$");
+
+    // 5) Restore protected code segments as plain text for marked
+    //    Math slots stay as placeholders through marked, then become HTML.
+    //    Code slots must go through marked, so restore them before marked.
+    const mathPlaceholders = [];
+    work = work.replace(/%%MDENH(\d+)%%/g, (full, idx) => {
+      const i = Number(idx);
+      const val = slots[i];
+      // Code segments start with ` ; math HTML starts with <
+      if (typeof val === "string" && val.charAt(0) === "`") {
+        return val;
+      }
+      const ph = "%%MATH" + mathPlaceholders.length + "%%";
+      mathPlaceholders.push(val);
+      return ph;
+    });
+
+    let html = parseMarkdownOnly(work);
+
+    // 6) Restore KaTeX HTML (escape-safe: placeholders survive marked as text)
+    html = html.replace(/%%MATH(\d+)%%/g, (_, idx) => mathPlaceholders[Number(idx)] || "");
+
+    // marked may wrap placeholders in <p> — unwrap pure math paragraphs when needed
+    html = html.replace(/<p>\s*(<span class="katex[\s\S]*?<\/span>)\s*<\/p>/g, "$1");
+    html = html.replace(
+      /<p>\s*(<span class="katex-display[\s\S]*?<\/span>)\s*<\/p>/g,
+      "$1"
+    );
+
+    return html;
+  }
+
   const updatePreview = debounce(function updatePreviewNow() {
     if (!state.customTextarea || !state.preview) return;
-    const html = parseMarkdown(state.customTextarea.value);
+    const html = renderMarkdownWithMath(state.customTextarea.value);
     state.preview.innerHTML = html;
   }, PREVIEW_DEBOUNCE_MS);
 
@@ -603,6 +722,8 @@
   }
 
   function start() {
+    ensureKatexStyles();
+
     let attempts = 0;
 
     const boot = () => {

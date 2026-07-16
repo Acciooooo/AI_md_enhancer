@@ -186,6 +186,34 @@
   font-style: italic;
 }
 
+/* KaTeX in preview — prevent overflow, keep display math readable */
+.md-enhancer-preview .katex {
+  font-size: 1.05em;
+}
+
+.md-enhancer-preview .katex-display {
+  display: block;
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
+  margin: 0.75em 0;
+  padding: 0.15em 0;
+  text-align: center;
+}
+
+.md-enhancer-preview .katex-display > .katex {
+  text-align: center;
+  white-space: nowrap;
+}
+
+.md-enhancer-preview .md-enhancer-math-fallback,
+.md-enhancer-preview .md-enhancer-math-error {
+  color: #b45309;
+  background: #fffbeb;
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+
 /* Preview typography */
 .md-enhancer-preview h1,
 .md-enhancer-preview h2,

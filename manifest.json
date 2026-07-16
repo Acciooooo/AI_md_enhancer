@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "DeepSeek Markdown Enhancer",
-  "version": "1.0.0",
-  "description": "Adds a Markdown editor with live preview, formatting toolbar, and reversed Enter/Ctrl+Enter shortcuts to chat.deepseek.com.",
+  "version": "1.1.0",
+  "description": "Adds a Markdown editor with live preview, LaTeX math (KaTeX), formatting toolbar, and reversed Enter/Ctrl+Enter shortcuts to chat.deepseek.com.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
@@ -18,9 +18,18 @@
   "content_scripts": [
     {
       "matches": ["https://chat.deepseek.com/*"],
-      "js": ["marked.min.js", "content.js"],
+      "js": ["katex/katex.min.js", "marked.min.js", "content.js"],
       "css": ["styles.css"],
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "katex/katex.min.css",
+        "katex/fonts/*"
+      ],
+      "matches": ["https://chat.deepseek.com/*"]
     }
   ],
   "host_permissions": ["https://chat.deepseek.com/*"]
