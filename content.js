@@ -157,10 +157,17 @@
     kimi: {
       id: "kimi",
       hostPattern: /(^|\.)kimi\.moonshot\.cn$|(^|\.)kimi\.com$/i,
+      layout: {
+        // Lexical editor needs visible focus for sync; prefer Enter after labeled send
+        submitRequireLabeled: true,
+        submitPreferEnter: true,
+      },
       selectors: {
         input: [
-          "div.chat-input-editor",
-          '[class*="chat-input-editor" i]',
+          // Lexical root is usually nested contenteditable under chat-input-editor
+          ".chat-input-editor [contenteditable='true']",
+          "div.chat-input-editor[contenteditable='true']",
+          '[class*="chat-input-editor" i] [contenteditable="true"]',
           '[class*="chat-input" i] [contenteditable="true"]',
           'textarea[placeholder*="尽管问" i]',
           'textarea[placeholder*="Ask" i]',
@@ -178,11 +185,10 @@
         submit: [
           'button[aria-label*="发送" i]',
           'button[aria-label*="send" i]',
-          '[class*="send" i]',
+          'button[data-testid*="send" i]',
+          '[class*="send-button" i]',
           ".segment-actions-content-btn",
           "button[type='submit']",
-          "button",
-          '[role="button"]',
         ],
       },
     },
@@ -511,8 +517,9 @@
   }
 
   function dispatchNativeEnter(input) {
-    if (!input) return;
-    input.focus();
+    const el = resolveEditableTarget(input) || input;
+    if (!el) return;
+    el.focus();
     const opts = {
       key: "Enter",
       code: "Enter",
@@ -521,16 +528,33 @@
       bubbles: true,
       cancelable: true,
     };
-    input.dispatchEvent(new KeyboardEvent("keydown", opts));
-    input.dispatchEvent(new KeyboardEvent("keypress", opts));
-    input.dispatchEvent(new KeyboardEvent("keyup", opts));
+    el.dispatchEvent(new KeyboardEvent("keydown", opts));
+    el.dispatchEvent(new KeyboardEvent("keypress", opts));
+    el.dispatchEvent(new KeyboardEvent("keyup", opts));
+  }
+
+  function resolveEditableTarget(input) {
+    if (!input) return null;
+    if (input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement) {
+      return input;
+    }
+    if (input.isContentEditable || input.getAttribute("contenteditable") === "true") {
+      return input;
+    }
+    const nested = input.querySelector?.(
+      '[contenteditable="true"]:not([contenteditable="false"])'
+    );
+    return nested instanceof HTMLElement ? nested : input;
   }
 
   function getNativeInputValue(input) {
-    if (!input) return "";
-    if (input instanceof HTMLTextAreaElement) return input.value || "";
-    if (input instanceof HTMLInputElement) return input.value || "";
-    if (input.isContentEditable) return input.textContent || "";
+    const el = resolveEditableTarget(input);
+    if (!el) return "";
+    if (el instanceof HTMLTextAreaElement) return el.value || "";
+    if (el instanceof HTMLInputElement) return el.value || "";
+    if (el.isContentEditable || el.getAttribute("contenteditable") === "true") {
+      return (el.innerText || el.textContent || "").replace(/\u200b/g, "");
+    }
     return "";
   }
 
@@ -558,16 +582,200 @@
     input.dispatchEvent(new KeyboardEvent("keyup", { key: "Process", bubbles: true }));
   }
 
+  function looksLikeLexicalEditor(el) {
+    if (!el) return false;
+    if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) return false;
+    if (el.getAttribute?.("data-lexical-editor") != null) return true;
+    if (el.closest?.("[data-lexical-editor]")) return true;
+    if (el.classList?.contains("chat-input-editor")) return true;
+    if (el.closest?.(".chat-input-editor, [class*='chat-input-editor']")) return true;
+    // Kimi chat composer is Lexical contenteditable
+    if (
+      state.adapter?.id === "kimi" &&
+      (el.isContentEditable || el.getAttribute?.("contenteditable") === "true")
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  /** Build a minimal Lexical editor-state JSON for plain text (multi-line → paragraphs). */
+  function buildLexicalPlaintextStateJSON(text) {
+    const lines = String(text).split("\n");
+    const children = lines.map((line) => {
+      const para = {
+        children: [],
+        direction: "ltr",
+        format: "",
+        indent: 0,
+        type: "paragraph",
+        version: 1,
+      };
+      if (line.length) {
+        para.children.push({
+          detail: 0,
+          format: 0,
+          mode: "normal",
+          style: "",
+          text: line,
+          type: "text",
+          version: 1,
+        });
+      }
+      return para;
+    });
+    return JSON.stringify({
+      root: {
+        children,
+        direction: "ltr",
+        format: "",
+        indent: 0,
+        type: "root",
+        version: 1,
+      },
+    });
+  }
+
   /**
-   * High-compat sync for contenteditable (Claude / ChatGPT ProseMirror).
-   * Prefer execCommand insertText so ProseMirror state updates correctly.
+   * Lexical lives in the page JS world; content-script expandos / innerHTML are ignored.
+   * Prefer background MAIN-world executeScript (bypasses page CSP); fall back to inline inject.
+   */
+  function syncLexicalViaBackground(target, value) {
+    return new Promise((resolve) => {
+      if (!target || !chrome?.runtime?.sendMessage) {
+        resolve(false);
+        return;
+      }
+      const attr = "data-" + NS + "-lex-target";
+      target.setAttribute(attr, "1");
+      const stateJSON = buildLexicalPlaintextStateJSON(value);
+      try {
+        chrome.runtime.sendMessage(
+          {
+            type: "md-enhancer-lexical-sync",
+            attr,
+            stateJSON,
+            value: String(value),
+          },
+          (response) => {
+            target.removeAttribute(attr);
+            if (chrome.runtime.lastError) {
+              resolve(false);
+              return;
+            }
+            resolve(!!(response && response.ok));
+          }
+        );
+      } catch (_) {
+        target.removeAttribute(attr);
+        resolve(false);
+      }
+    });
+  }
+
+  /** Sync inline script fallback when background scripting is unavailable. */
+  function syncLexicalViaInlineScript(target, value) {
+    if (!target) return false;
+    const attr = "data-" + NS + "-lex-target";
+    const marker = "data-" + NS + "-lex-ok";
+    document.documentElement.removeAttribute(marker);
+    target.setAttribute(attr, "1");
+
+    const stateJSON = buildLexicalPlaintextStateJSON(value);
+    const script = document.createElement("script");
+    script.textContent =
+      "(function(){try{" +
+      "var attr=" +
+      JSON.stringify(attr) +
+      ";" +
+      "var marker=" +
+      JSON.stringify(marker) +
+      ";" +
+      "var stateJSON=" +
+      JSON.stringify(stateJSON) +
+      ";" +
+      "var value=" +
+      JSON.stringify(String(value)) +
+      ";" +
+      "var el=document.querySelector('['+attr+']');" +
+      "if(!el){document.documentElement.setAttribute(marker,'0');return;}" +
+      "el.removeAttribute(attr);" +
+      "function findEditor(node){" +
+      "var n=node;while(n){if(n.__lexicalEditor)return n.__lexicalEditor;n=n.parentElement;}" +
+      "if(node&&node.querySelectorAll){var all=node.querySelectorAll('*');" +
+      "for(var i=0;i<all.length;i++){if(all[i].__lexicalEditor)return all[i].__lexicalEditor;}}" +
+      "return null;}" +
+      "var editor=findEditor(el);" +
+      "if(editor&&typeof editor.parseEditorState==='function'&&typeof editor.setEditorState==='function'){" +
+      "editor.setEditorState(editor.parseEditorState(stateJSON));" +
+      "document.documentElement.setAttribute(marker,'1');return;}" +
+      "el.focus();" +
+      "try{document.execCommand('selectAll',false,null);document.execCommand('delete',false,null);}catch(e){}" +
+      "var ok=false;try{ok=!!document.execCommand('insertText',false,value);}catch(e){ok=false;}" +
+      "if(!ok){try{" +
+      "var dt=new DataTransfer();dt.setData('text/plain',value);" +
+      "var html=String(value).split(/\\n/).map(function(l){" +
+      "return '<p>'+String(l).replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</p>';}).join('');" +
+      "dt.setData('text/html',html);" +
+      "var evt=new Event('paste',{bubbles:true,cancelable:true,composed:true});" +
+      "Object.defineProperty(evt,'clipboardData',{value:dt});" +
+      "el.dispatchEvent(evt);ok=true;}catch(e){ok=false;}}" +
+      "document.documentElement.setAttribute(marker,ok?'1':'0');" +
+      "}catch(err){document.documentElement.setAttribute(" +
+      JSON.stringify(marker) +
+      ",'0');}})();";
+
+    (document.documentElement || document.head).appendChild(script);
+    script.remove();
+    target.removeAttribute(attr);
+    return document.documentElement.getAttribute(marker) === "1";
+  }
+
+  async function syncLexicalEditor(target, value) {
+    let ok = await syncLexicalViaBackground(target, value);
+    if (ok) return true;
+    ok = syncLexicalViaInlineScript(target, value);
+    if (ok) return true;
+    // Last DOM attempts from content script (sometimes works if Lexical listens)
+    try {
+      target.focus();
+      document.execCommand("selectAll", false, null);
+      document.execCommand("delete", false, null);
+      if (document.execCommand("insertText", false, value)) return true;
+      dispatchSyntheticPaste(target, value);
+      return !!getNativeInputValue(target).replace(/\u200b/g, "").trim();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /** Synthetic paste with clipboardData via defineProperty (ClipboardEvent ctor often drops it). */
+  function dispatchSyntheticPaste(target, value) {
+    const dt = new DataTransfer();
+    dt.setData("text/plain", value);
+    const html = String(value)
+      .split("\n")
+      .map((line) => "<p>" + String(line).replace(/&/g, "&amp;").replace(/</g, "&lt;") + "</p>")
+      .join("");
+    dt.setData("text/html", html);
+    const evt = new Event("paste", { bubbles: true, cancelable: true, composed: true });
+    Object.defineProperty(evt, "clipboardData", { value: dt });
+    target.dispatchEvent(evt);
+  }
+
+  /**
+   * Sync contenteditable (ProseMirror / Quill / non-Lexical).
+   * Lexical (Kimi) is handled asynchronously via syncLexicalEditor.
    */
   function syncContentEditableValue(input, value) {
-    input.focus();
+    const target = resolveEditableTarget(input);
+    if (!target) return;
+
+    target.focus();
 
     try {
       const range = document.createRange();
-      range.selectNodeContents(input);
+      range.selectNodeContents(target);
       const sel = window.getSelection();
       sel.removeAllRanges();
       sel.addRange(range);
@@ -578,16 +786,37 @@
     let inserted = false;
     try {
       document.execCommand("selectAll", false, null);
+      document.execCommand("delete", false, null);
       inserted = document.execCommand("insertText", false, value);
     } catch (_) {
       inserted = false;
     }
 
-    if (!inserted) {
-      input.textContent = value;
+    if (!inserted || !getNativeInputValue(target).trim()) {
+      try {
+        dispatchSyntheticPaste(target, value);
+        inserted = !!getNativeInputValue(target).trim();
+      } catch (_) {
+        inserted = false;
+      }
     }
 
-    input.dispatchEvent(
+    // Avoid innerHTML for Lexical — reconciler clears it and submit sees empty text
+    if (
+      (!inserted || !getNativeInputValue(target).trim()) &&
+      !looksLikeLexicalEditor(target) &&
+      !looksLikeLexicalEditor(input)
+    ) {
+      target.innerHTML = "";
+      const lines = String(value).split("\n");
+      lines.forEach((line) => {
+        const p = document.createElement("p");
+        p.textContent = line.length ? line : "\u200b";
+        target.appendChild(p);
+      });
+    }
+
+    target.dispatchEvent(
       new InputEvent("beforeinput", {
         bubbles: true,
         cancelable: true,
@@ -595,26 +824,64 @@
         data: value,
       })
     );
-    input.dispatchEvent(
+    target.dispatchEvent(
       new InputEvent("input", {
         bubbles: true,
         inputType: "insertText",
         data: value,
       })
     );
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-    input.dispatchEvent(new KeyboardEvent("keyup", { key: "Process", bubbles: true }));
+    target.dispatchEvent(new Event("change", { bubbles: true }));
+    target.dispatchEvent(new KeyboardEvent("keyup", { key: "Process", bubbles: true }));
   }
 
   function syncNativeInputValue(input, value) {
     if (!input) return;
-    if (input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement) {
-      syncTextareaLikeValue(input, value);
+    const target = resolveEditableTarget(input);
+    if (!target) return;
+
+    if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) {
+      syncTextareaLikeValue(target, value);
       return;
     }
-    if (input.isContentEditable || input.getAttribute("contenteditable") === "true") {
-      syncContentEditableValue(input, value);
+    if (target.isContentEditable || target.getAttribute("contenteditable") === "true") {
+      // Fire-and-forget Lexical path for sync-back on close; submit uses async helper
+      if (looksLikeLexicalEditor(target) || looksLikeLexicalEditor(input)) {
+        void syncLexicalEditor(target, value);
+        if (target !== input && state.originalInput === input) {
+          state.originalInput = target;
+        }
+        return;
+      }
+      syncContentEditableValue(target, value);
+      if (target !== input && state.originalInput === input) {
+        state.originalInput = target;
+      }
     }
+  }
+
+  async function syncNativeInputValueAsync(input, value) {
+    if (!input) return false;
+    const target = resolveEditableTarget(input);
+    if (!target) return false;
+
+    if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) {
+      syncTextareaLikeValue(target, value);
+      return !!String(target.value || "").trim();
+    }
+
+    if (target.isContentEditable || target.getAttribute("contenteditable") === "true") {
+      if (target !== input && state.originalInput === input) {
+        state.originalInput = target;
+      }
+      if (looksLikeLexicalEditor(target) || looksLikeLexicalEditor(input)) {
+        const ok = await syncLexicalEditor(target, value);
+        if (ok) return true;
+      }
+      syncContentEditableValue(target, value);
+      return !!getNativeInputValue(target).replace(/\u200b/g, "").trim();
+    }
+    return false;
   }
 
   /**
@@ -972,6 +1239,8 @@
     if (!state.wrapper) return;
 
     if (syncBack && state.customTextarea && state.originalInput) {
+      // Reveal before sync so Lexical can accept focus / setEditorState
+      hideOriginalInput(false);
       syncNativeInputValue(state.originalInput, state.customTextarea.value);
     }
 
@@ -984,7 +1253,9 @@
       state.hostRoot.setAttribute("aria-hidden", "true");
     }
     state.isOpen = false;
-    hideOriginalInput(false);
+    if (!syncBack) {
+      hideOriginalInput(false);
+    }
 
     // Force Gemini to recompute absolute shell position after host collapses.
     if (isReplaceShellMode(state.adapter) && state.originalContainer) {
@@ -1034,10 +1305,12 @@
     if (!text.trim()) return;
 
     const adapter = state.adapter;
-    const preferEnter = !!adapter?.layout?.submitPreferEnter || adapter?.id === "gemini";
+    const preferEnter =
+      !!adapter?.layout?.submitPreferEnter ||
+      adapter?.id === "gemini" ||
+      adapter?.id === "kimi";
 
-    // 1) Sync into native composer so Gemini swaps mic → send
-    syncNativeInputValue(state.originalInput, text);
+    // Reveal native composer FIRST — Lexical ignores focus/setState while display:none
     hideOriginalInput(false);
 
     const finish = () => {
@@ -1046,37 +1319,81 @@
       closeEditor(false);
     };
 
+    const syncAndVerify = async () => {
+      // Re-resolve in case SPA remounted the composer while we were open
+      const live =
+        (state.originalInput?.isConnected && state.originalInput) ||
+        findSiteInput(adapter);
+      if (live) {
+        state.originalInput = resolveEditableTarget(live) || live;
+        if (!state.originalContainer?.isConnected) {
+          state.originalContainer = findInputContainer(state.originalInput, adapter);
+        }
+      }
+      const target = resolveEditableTarget(state.originalInput);
+      if (target && target !== state.originalInput) {
+        state.originalInput = target;
+      }
+      const synced = await syncNativeInputValueAsync(state.originalInput, text);
+      if (synced) return true;
+      // Lexical setEditorState may update DOM on next frame
+      await new Promise((r) => requestAnimationFrame(() => r()));
+      const written = getNativeInputValue(state.originalInput).trim();
+      return written.replace(/\u200b/g, "").length > 0;
+    };
+
     const clickSendOrEnter = () => {
       const nativeBtn = findNativeSubmitButton(state.originalInput, adapter);
       if (nativeBtn && isLabeledSendControl(nativeBtn)) {
         nativeBtn.click();
         return;
       }
-      // Gemini empty-state mic is never a valid target — use Enter instead
       if (preferEnter || !nativeBtn) {
-        dispatchNativeEnter(state.originalInput);
+        dispatchNativeEnter(resolveEditableTarget(state.originalInput) || state.originalInput);
         return;
       }
-      // Non-Gemini unlabeled fallback (legacy sites)
       nativeBtn.click();
     };
 
-    // Give Angular/React a short window to show the real send button after text sync
+    // Sync after paint so the native field is visible/focusable
     let attempts = 0;
-    const maxAttempts = preferEnter ? 10 : 2;
-    const tick = () => {
+    const maxAttempts = adapter?.id === "kimi" ? 16 : preferEnter ? 12 : 3;
+    const tick = async () => {
       attempts++;
+      let ok = false;
+      try {
+        ok = await syncAndVerify();
+      } catch (_) {
+        ok = false;
+      }
       const btn = findNativeSubmitButton(state.originalInput, adapter);
-      if ((btn && isLabeledSendControl(btn)) || attempts >= maxAttempts) {
-        clickSendOrEnter();
-        finish();
+      const ready =
+        (ok && btn && isLabeledSendControl(btn)) ||
+        (ok && attempts >= 3) ||
+        attempts >= maxAttempts;
+
+      if (!ready) {
+        window.setTimeout(() => {
+          void tick();
+        }, 50);
         return;
       }
-      window.setTimeout(tick, 50);
+
+      if (ok) {
+        clickSendOrEnter();
+        // Give Lexical/React a tick to flush before tearing down the overlay
+        window.setTimeout(finish, adapter?.id === "kimi" ? 80 : 0);
+        return;
+      }
+
+      // Sync failed — keep MD editor open so text is not lost; re-hide native shell
+      hideOriginalInput(true);
     };
 
     requestAnimationFrame(() => {
-      window.setTimeout(tick, 40);
+      window.setTimeout(() => {
+        void tick();
+      }, 40);
     });
   }
 
