@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "AI Markdown Enhancer",
-  "version": "1.4.0",
-  "description": "Adds a Markdown editor with live preview and LaTeX math to DeepSeek, ChatGPT, Doubao, Gemini, and more.",
+  "version": "1.5.0",
+  "description": "Adds a Markdown editor with live preview and LaTeX math to DeepSeek, ChatGPT, Doubao, Gemini, Kimi, and more.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
@@ -23,7 +23,10 @@
         "https://chat.openai.com/*",
         "https://www.doubao.com/*",
         "https://doubao.com/*",
-        "https://gemini.google.com/*"
+        "https://gemini.google.com/*",
+        "https://www.kimi.com/*",
+        "https://kimi.com/*",
+        "https://kimi.moonshot.cn/*"
       ],
       "js": ["katex/katex.min.js", "marked.min.js", "content.js"],
       "css": ["styles.css"],
@@ -42,7 +45,10 @@
         "https://chat.openai.com/*",
         "https://www.doubao.com/*",
         "https://doubao.com/*",
-        "https://gemini.google.com/*"
+        "https://gemini.google.com/*",
+        "https://www.kimi.com/*",
+        "https://kimi.com/*",
+        "https://kimi.moonshot.cn/*"
       ]
     }
   ],
@@ -52,6 +58,9 @@
     "https://chat.openai.com/*",
     "https://www.doubao.com/*",
     "https://doubao.com/*",
-    "https://gemini.google.com/*"
+    "https://gemini.google.com/*",
+    "https://www.kimi.com/*",
+    "https://kimi.com/*",
+    "https://kimi.moonshot.cn/*"
   ]
 }

@@ -2,7 +2,7 @@
 
 A lightweight Chrome / Edge (Manifest V3) extension that adds a Markdown editor with live preview to AI chat sites.
 
-**Supported sites:** [DeepSeek](https://chat.deepseek.com) · [ChatGPT](https://chatgpt.com) · [豆包](https://www.doubao.com) · [Gemini](https://gemini.google.com)
+**Supported sites:** [DeepSeek](https://chat.deepseek.com) · [ChatGPT](https://chatgpt.com) · [豆包](https://www.doubao.com) · [Gemini](https://gemini.google.com) · [Kimi](https://www.kimi.com)
 
 ## Features
 
@@ -51,7 +51,7 @@ $$
 2. Enable **Developer mode**
 3. Click **Load unpacked**
 4. Select the `deepseek-md-enhancer` folder
-5. Visit [chat.deepseek.com](https://chat.deepseek.com), [chatgpt.com](https://chatgpt.com), [doubao.com](https://www.doubao.com), or [gemini.google.com](https://gemini.google.com) and click the expand (⛶) icon on the chat input
+5. Visit [chat.deepseek.com](https://chat.deepseek.com), [chatgpt.com](https://chatgpt.com), [doubao.com](https://www.doubao.com), [gemini.google.com](https://gemini.google.com), or [kimi.com](https://www.kimi.com) and click the expand (⛶) icon on the chat input
 
 ## Install (Edge)
 
@@ -70,8 +70,8 @@ $$
 
 ## Technical notes
 
-- Host permissions: `chat.deepseek.com`, `chatgpt.com`, `chat.openai.com`, `doubao.com`, `gemini.google.com`
-- Strategy adapters in `content.js` auto-detect the current site (DeepSeek / ChatGPT / 豆包 / Gemini / Claude-ready)
+- Host permissions: `chat.deepseek.com`, `chatgpt.com`, `chat.openai.com`, `doubao.com`, `gemini.google.com`, `kimi.com`, `kimi.moonshot.cn`
+- Strategy adapters in `content.js` auto-detect the current site (DeepSeek / ChatGPT / 豆包 / Gemini / Kimi / Claude-ready)
 - Injected UI uses the `md-enhancer-*` class prefix for CSS isolation
 - `marked.min.js` and `katex/` are bundled locally — no remote script loading
 - KaTeX CSS is injected at runtime with `chrome.runtime.getURL` so font files resolve under MV3

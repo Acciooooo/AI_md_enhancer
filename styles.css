@@ -426,3 +426,58 @@
 .md-enhancer-hide-original {
   display: none !important;
 }
+
+/*
+ * Gemini host lives inside fieldset.input-area-container.
+ * When collapsed it must take ZERO layout space — otherwise Gemini's
+ * absolute-positioned shell jumps to mid-page (blank gap below).
+ */
+fieldset.input-area-container > .md-enhancer-host:not(.md-enhancer-gemini-host),
+.input-area-container > .md-enhancer-host:not(.md-enhancer-gemini-host) {
+  display: none !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  max-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  border: none !important;
+  flex: none !important;
+}
+
+/* Gemini: replace outer input shell with full editor (only while open) */
+fieldset.input-area-container.md-enhancer-gemini-replaced,
+.input-area-container.md-enhancer-gemini-replaced {
+  display: flex !important;
+  flex-direction: column;
+  min-height: 360px;
+  box-sizing: border-box;
+}
+
+.md-enhancer-host.md-enhancer-gemini-host {
+  width: 100%;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 340px;
+  height: auto;
+  max-height: none;
+  overflow: visible;
+  margin: 0;
+  padding: 0;
+}
+
+.md-enhancer-wrapper.md-enhancer-gemini-open {
+  width: 100%;
+  min-height: 340px;
+  margin: 0;
+  border: none;
+  box-shadow: none;
+  background: transparent;
+  padding: 8px 4px;
+}
+
+.md-enhancer-wrapper.md-enhancer-gemini-open .md-enhancer-textarea,
+.md-enhancer-wrapper.md-enhancer-gemini-open .md-enhancer-preview {
+  min-height: 280px;
+}

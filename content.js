@@ -95,6 +95,10 @@
     chatgpt: {
       id: "chatgpt",
       hostPattern: /(^|\.)chatgpt\.com$|(^|\.)chat\.openai\.com$/i,
+      layout: {
+        buttonPlacement: "outside-right",
+        buttonGap: 6,
+      },
       selectors: {
         input: [
           'div#prompt-textarea[contenteditable="true"]',
@@ -150,27 +154,70 @@
         ],
       },
     },
+    kimi: {
+      id: "kimi",
+      hostPattern: /(^|\.)kimi\.moonshot\.cn$|(^|\.)kimi\.com$/i,
+      selectors: {
+        input: [
+          "div.chat-input-editor",
+          '[class*="chat-input-editor" i]',
+          '[class*="chat-input" i] [contenteditable="true"]',
+          'textarea[placeholder*="尽管问" i]',
+          'textarea[placeholder*="Ask" i]',
+          'textarea[placeholder*="问" i]',
+          'div[contenteditable="true"][role="textbox"]',
+          '[contenteditable="true"]',
+          "textarea",
+        ],
+        container: [
+          '[class*="chat-input" i]',
+          '[class*="composer" i]',
+          '[class*="prompt" i]',
+          "form",
+        ],
+        submit: [
+          'button[aria-label*="发送" i]',
+          'button[aria-label*="send" i]',
+          '[class*="send" i]',
+          ".segment-actions-content-btn",
+          "button[type='submit']",
+          "button",
+          '[role="button"]',
+        ],
+      },
+    },
     gemini: {
       id: "gemini",
       hostPattern: /(^|\.)gemini\.google\.com$/i,
+      layout: {
+        mode: "replace-shell",
+        shellSelectors: [
+          "fieldset.input-area-container",
+          ".input-area-container",
+        ],
+        buttonPlacement: "outside-right",
+        buttonGap: 6,
+        editorMinHeight: 360,
+      },
       selectors: {
         input: [
+          'rich-textarea .ql-editor[contenteditable="true"]',
           'rich-textarea [contenteditable="true"]',
           'div.ql-editor[contenteditable="true"]',
           'div[contenteditable="true"][role="textbox"]',
-          'div[contenteditable="true"][aria-label*="prompt" i]',
           'textarea[aria-label*="Ask" i]',
           "textarea",
         ],
         container: [
-          "rich-textarea",
-          '[class*="input-area" i]',
-          "form",
-          "main",
+          "fieldset.input-area-container",
+          ".input-area-container",
+          'div.input-area[data-node-type="input-area"]',
+          "input-area-v2",
         ],
         submit: [
           'button[aria-label*="Send message" i]',
           'button[aria-label*="Send" i]',
+          'button[aria-label*="发送" i]',
           'button[mattooltip*="Send" i]',
           'button[data-tooltip*="Send" i]',
           ".send-button",
@@ -262,6 +309,29 @@
       if (adapter.hostPattern.test(host)) return adapter;
     }
     return siteAdapters.deepseek;
+  }
+
+  function isReplaceShellMode(adapter) {
+    return adapter?.layout?.mode === "replace-shell";
+  }
+
+  function findGeminiShell(input, adapter) {
+    if (!input) return null;
+    for (const sel of adapter.layout?.shellSelectors || []) {
+      const matched = input.closest(sel);
+      if (matched instanceof HTMLElement) return matched;
+    }
+    return (
+      input.closest("fieldset.input-area-container") ||
+      input.closest(".input-area-container")
+    );
+  }
+
+  function resolveInjectContainer(input, adapter) {
+    if (isReplaceShellMode(adapter)) {
+      return findGeminiShell(input, adapter);
+    }
+    return findInputContainer(input, adapter);
   }
 
   function isEditorInput(el) {
@@ -795,14 +865,30 @@
     updateSubmitEnabled();
     updatePreview();
 
+    const replaceShell = isReplaceShellMode(state.adapter);
+    const editorMin = state.adapter?.layout?.editorMinHeight || 360;
+
     // Measure again in case layout changed
     const h = state.originalInput.getBoundingClientRect().height || state.originalHeight || 60;
-    const minH = Math.max(Math.round(h * HEIGHT_MULTIPLIER), 180);
+    const minH = replaceShell
+      ? Math.max(editorMin, 180)
+      : Math.max(Math.round(h * HEIGHT_MULTIPLIER), 180);
     state.customTextarea.style.minHeight = minH + "px";
     state.preview.style.minHeight = minH + "px";
 
-    state.wrapper.style.width = "";
-    state.wrapper.style.maxWidth = "";
+    if (replaceShell) {
+      state.wrapper.style.width = "100%";
+      state.wrapper.style.maxWidth = "100%";
+      state.originalContainer.classList.add(NS + "-gemini-replaced");
+      state.wrapper.classList.add(NS + "-gemini-open");
+      if (state.hostRoot) {
+        state.hostRoot.classList.add(NS + "-gemini-host");
+        state.hostRoot.removeAttribute("aria-hidden");
+      }
+    } else {
+      state.wrapper.style.width = "";
+      state.wrapper.style.maxWidth = "";
+    }
 
     state.wrapper.classList.add("is-open");
     state.expandBtn?.classList.add("is-active");
@@ -827,9 +913,23 @@
     }
 
     state.wrapper.classList.remove("is-open");
+    state.wrapper.classList.remove(NS + "-gemini-open");
     state.expandBtn?.classList.remove("is-active");
+    state.originalContainer?.classList.remove(NS + "-gemini-replaced");
+    if (state.hostRoot) {
+      state.hostRoot.classList.remove(NS + "-gemini-host");
+      state.hostRoot.setAttribute("aria-hidden", "true");
+    }
     state.isOpen = false;
     hideOriginalInput(false);
+
+    // Force Gemini to recompute absolute shell position after host collapses.
+    if (isReplaceShellMode(state.adapter) && state.originalContainer) {
+      requestAnimationFrame(() => {
+        window.dispatchEvent(new Event("resize"));
+        positionExpandButton();
+      });
+    }
 
     if (state.debounceTimer != null) {
       clearTimeout(state.debounceTimer);
@@ -854,7 +954,7 @@
         if (child.classList.contains(NS + "-expand-btn")) return;
         child.classList.add(NS + "-hide-original");
       });
-      if (!ta.classList.contains(EXTEND_BTN_CLASS)) {
+      if (!isReplaceShellMode(state.adapter) && !ta.classList.contains(EXTEND_BTN_CLASS)) {
         ta.classList.add(NS + "-hide-original");
       }
     } else {
@@ -907,7 +1007,10 @@
 
     const rect = container.getBoundingClientRect();
     const size = 30;
-    const gap = 8;
+    const outsideRight = state.adapter?.layout?.buttonPlacement === "outside-right";
+    const gap = outsideRight
+      ? (state.adapter?.layout?.buttonGap ?? 6)
+      : 8;
 
     if (rect.width <= 0 || rect.height <= 0) {
       btn.style.display = "none";
@@ -915,8 +1018,19 @@
     }
 
     btn.style.display = "";
-    btn.style.top = Math.round(rect.top + gap) + "px";
-    btn.style.left = Math.round(rect.right - size - gap) + "px";
+    if (outsideRight) {
+      // Place button just outside the dialog/composer on the right, vertically centered.
+      const top = rect.top + Math.max((rect.height - size) / 2, 2);
+      let left = rect.right + gap;
+      if (left + size > window.innerWidth - 4) {
+        left = Math.max(rect.right - size - 4, 4);
+      }
+      btn.style.top = Math.round(top) + "px";
+      btn.style.left = Math.round(left) + "px";
+    } else {
+      btn.style.top = Math.round(rect.top + gap) + "px";
+      btn.style.left = Math.round(rect.right - size - gap) + "px";
+    }
   }
 
   function startLayoutSync() {
@@ -936,10 +1050,28 @@
   }
 
   /**
-   * Host root is a sibling AFTER the native container — never inside React's input tree.
+   * Host root: Gemini mounts inside shell; others mount as sibling after container.
    */
-  function ensureHostRoot(container) {
-    if (!container?.parentElement) return null;
+  function ensureHostRoot(container, adapter) {
+    if (!container) return null;
+
+    if (isReplaceShellMode(adapter)) {
+      let host = Array.from(container.children).find(
+        (c) => c instanceof HTMLElement && c.classList.contains(NS + "-host")
+      );
+      if (host instanceof HTMLElement) return host;
+
+      host = document.createElement("div");
+      // Do NOT add gemini-host here — that class enables min-height and would
+      // stretch Gemini's absolute-positioned shell on inject (layout jump).
+      host.className = NS + "-host";
+      host.setAttribute("data-" + NS, "host");
+      host.setAttribute("aria-hidden", "true");
+      container.appendChild(host);
+      return host;
+    }
+
+    if (!container.parentElement) return null;
 
     const parent = container.parentElement;
     let host = container.nextElementSibling;
@@ -964,11 +1096,18 @@
       if (orphan && orphan !== state.expandBtn) orphan.remove();
     }
 
-    const container = findInputContainer(input, adapter);
+    const container = resolveInjectContainer(input, adapter);
     if (!container) return false;
 
-    const host = ensureHostRoot(container);
+    const host = ensureHostRoot(container, adapter);
     if (!host) return false;
+
+    // Collapsed Gemini host must never stretch the shell.
+    if (isReplaceShellMode(adapter) && !state.isOpen) {
+      host.classList.remove(NS + "-gemini-host");
+      host.setAttribute("aria-hidden", "true");
+      container.classList.remove(NS + "-gemini-replaced");
+    }
 
     // Editor already mounted for this host
     if (host.querySelector("." + NS + "-wrapper") && state.expandBtn?.isConnected) {
@@ -1016,7 +1155,10 @@
     if (state.isInjecting || state.isOpen) return false;
 
     // Stale binding after SPA destroyed the composer
-    if (state.originalInput && !state.originalInput.isConnected) {
+    if (
+      (state.originalInput && !state.originalInput.isConnected) ||
+      (state.originalContainer && !state.originalContainer.isConnected)
+    ) {
       teardownUI(false);
     }
 
@@ -1036,6 +1178,9 @@
     if (state.debounceTimer != null) clearTimeout(state.debounceTimer);
     stopLayoutSync();
     state.expandBtn?.remove();
+    state.originalContainer?.classList.remove(NS + "-gemini-replaced");
+    state.wrapper?.classList.remove(NS + "-gemini-open");
+    state.hostRoot?.classList.remove(NS + "-gemini-host");
     if (removeHost !== false) {
       state.hostRoot?.remove();
     } else if (state.wrapper) {
@@ -1056,7 +1201,10 @@
   function onDomMutation() {
     if (state.isInjecting) return;
 
-    if (state.originalInput && !state.originalInput.isConnected) {
+    if (
+      (state.originalInput && !state.originalInput.isConnected) ||
+      (state.originalContainer && !state.originalContainer.isConnected)
+    ) {
       teardownUI(false);
     }
 
@@ -1065,7 +1213,10 @@
       return;
     }
 
-    if (state.originalInput && !state.originalInput.isConnected) {
+    if (
+      (state.originalInput && !state.originalInput.isConnected) ||
+      (state.originalContainer && !state.originalContainer.isConnected)
+    ) {
       teardownUI(false);
       tryInject();
       return;
