@@ -1,5 +1,7 @@
 # AI Markdown Enhancer
 
+**English** | [中文](./README_zh.md)
+
 A lightweight Chrome / Edge (Manifest V3) extension that adds a Markdown editor with live preview to AI chat sites.
 
 **Supported sites:** [DeepSeek](https://chat.deepseek.com) · [ChatGPT](https://chatgpt.com) · [豆包](https://www.doubao.com) · [Gemini](https://gemini.google.com) · [Kimi](https://www.kimi.com)
@@ -21,6 +23,7 @@ A lightweight Chrome / Edge (Manifest V3) extension that adds a Markdown editor 
 ```
 deepseek-md-enhancer/
 ├── manifest.json
+├── background.js
 ├── content.js
 ├── styles.css
 ├── marked.min.js
@@ -29,7 +32,8 @@ deepseek-md-enhancer/
 │   ├── katex.min.css
 │   └── fonts/
 ├── icons/
-└── README.md
+├── README.md
+└── README_zh.md
 ```
 
 ## Math examples
