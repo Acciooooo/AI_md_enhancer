@@ -1,20 +1,26 @@
 /**
- * DeepSeek Markdown Enhancer — content script
- * Injects a Markdown editor into https://chat.deepseek.com
+ * Universal AI Markdown Enhancer — content script
+ * Uses strategy adapters for DeepSeek / ChatGPT / Claude.
  */
 (function () {
   "use strict";
 
   const NS = "md-enhancer";
+  const EXTEND_BTN_CLASS = "my-custom-extension-btn";
   const PREVIEW_DEBOUNCE_MS = 500;
   const HEIGHT_MULTIPLIER = 3;
-  const INIT_RETRY_MS = 800;
-  const MAX_INIT_ATTEMPTS = 60;
+  /** Wait past React/Next.js hydration before first inject */
+  const HYDRATION_SETTLE_MS = 2000;
+  const IDLE_CALLBACK_TIMEOUT_MS = 4000;
+  /** Debounce MutationObserver bursts (SPA route swaps) */
+  const MO_DEBOUNCE_MS = 400;
 
   /** @type {{
-   *   originalTextarea: HTMLTextAreaElement | null,
+   *   originalInput: HTMLElement | null,
    *   originalContainer: HTMLElement | null,
+   *   adapter: ReturnType<typeof resolveAdapter> | null,
    *   expandBtn: HTMLButtonElement | null,
+   *   hostRoot: HTMLElement | null,
    *   wrapper: HTMLElement | null,
    *   customTextarea: HTMLTextAreaElement | null,
    *   preview: HTMLElement | null,
@@ -22,12 +28,18 @@
    *   isOpen: boolean,
    *   debounceTimer: number | null,
    *   observer: MutationObserver | null,
+   *   moDebounceTimer: number | null,
+   *   isInjecting: boolean,
+   *   layoutSyncActive: boolean,
+   *   onLayoutSync: (() => void) | null,
    *   originalHeight: number
    * }} */
   const state = {
-    originalTextarea: null,
+    originalInput: null,
     originalContainer: null,
+    adapter: null,
     expandBtn: null,
+    hostRoot: null,
     wrapper: null,
     customTextarea: null,
     preview: null,
@@ -35,8 +47,15 @@
     isOpen: false,
     debounceTimer: null,
     observer: null,
+    moDebounceTimer: null,
+    isInjecting: false,
+    layoutSyncActive: false,
+    onLayoutSync: null,
     originalHeight: 0,
   };
+
+  /** Track inputs we have bound without mutating host DOM attributes */
+  const boundInputs = new WeakSet();
 
   const SNIPPETS = {
     code:
@@ -47,6 +66,142 @@
       "| Cell 1   | Cell 2   | Cell 3   |\n" +
       "| Cell 4   | Cell 5   | Cell 6   |",
     heading: "### New Heading",
+  };
+
+  const siteAdapters = {
+    deepseek: {
+      id: "deepseek",
+      hostPattern: /(^|\.)chat\.deepseek\.com$/i,
+      selectors: {
+        input: [
+          'textarea[placeholder*="DeepSeek" i]',
+          'textarea[placeholder*="Message" i]',
+          "textarea",
+        ],
+        container: [
+          '[data-testid*="chat-input" i]',
+          'form:has(textarea)',
+        ],
+        submit: [
+          'button[aria-label*="send" i]',
+          '[role="button"][aria-label*="send" i]',
+          ".ds-button",
+          ".ds-icon-button",
+          "button",
+          '[role="button"]',
+        ],
+      },
+    },
+    chatgpt: {
+      id: "chatgpt",
+      hostPattern: /(^|\.)chatgpt\.com$|(^|\.)chat\.openai\.com$/i,
+      selectors: {
+        input: [
+          'div#prompt-textarea[contenteditable="true"]',
+          'div#prompt-textarea.ProseMirror',
+          "#prompt-textarea",
+          '[contenteditable="true"][data-testid="prompt-textarea"]',
+          'div.ProseMirror[contenteditable="true"]',
+          'textarea[data-testid="prompt-textarea"]',
+          "textarea",
+        ],
+        container: [
+          '[data-testid="composer"]',
+          'form:has(#prompt-textarea)',
+          "form",
+        ],
+        submit: [
+          'button[data-testid="send-button"]',
+          'button[data-testid*="send" i]',
+          'button[aria-label*="send" i]',
+          'button[aria-label*="Send" i]',
+          "button",
+        ],
+      },
+    },
+    doubao: {
+      id: "doubao",
+      hostPattern: /(^|\.)doubao\.com$/i,
+      selectors: {
+        input: [
+          'textarea[data-testid="chat_input_input"]',
+          'textarea[data-testid*="chat_input" i]',
+          'textarea[placeholder*="问" i]',
+          'textarea[placeholder*="输入" i]',
+          'textarea[placeholder*="发消息" i]',
+          '[contenteditable="true"][role="textbox"]',
+          '[class*="chat-input" i] [contenteditable="true"]',
+          '[contenteditable="true"]',
+          "textarea",
+        ],
+        container: [
+          '[data-testid*="chat_input" i]',
+          '[class*="chat-input" i]',
+          '[class*="input-area" i]',
+          "form",
+        ],
+        submit: [
+          'button[data-testid*="send" i]',
+          'button[aria-label*="发送" i]',
+          'button[aria-label*="send" i]',
+          '[role="button"][aria-label*="发送" i]',
+          "button",
+          '[role="button"]',
+        ],
+      },
+    },
+    gemini: {
+      id: "gemini",
+      hostPattern: /(^|\.)gemini\.google\.com$/i,
+      selectors: {
+        input: [
+          'rich-textarea [contenteditable="true"]',
+          'div.ql-editor[contenteditable="true"]',
+          'div[contenteditable="true"][role="textbox"]',
+          'div[contenteditable="true"][aria-label*="prompt" i]',
+          'textarea[aria-label*="Ask" i]',
+          "textarea",
+        ],
+        container: [
+          "rich-textarea",
+          '[class*="input-area" i]',
+          "form",
+          "main",
+        ],
+        submit: [
+          'button[aria-label*="Send message" i]',
+          'button[aria-label*="Send" i]',
+          'button[mattooltip*="Send" i]',
+          'button[data-tooltip*="Send" i]',
+          ".send-button",
+          "button",
+        ],
+      },
+    },
+    claude: {
+      id: "claude",
+      hostPattern: /(^|\.)claude\.ai$/i,
+      selectors: {
+        input: [
+          '[contenteditable="true"][role="textbox"]',
+          '[contenteditable="true"][data-placeholder]',
+          '[contenteditable="true"]',
+          "textarea",
+        ],
+        container: [
+          '[data-testid*="composer" i]',
+          "form",
+          "main",
+        ],
+        submit: [
+          'button[aria-label*="send" i]',
+          'button[aria-label*="发送" i]',
+          '[data-testid*="send" i]',
+          "button",
+          '[role="button"]',
+        ],
+      },
+    },
   };
 
   /* ─── utilities ─── */
@@ -73,58 +228,93 @@
     return rect.width > 0 && rect.height > 0;
   }
 
-  /**
-   * Find DeepSeek's chat input using robust, attribute-first selectors.
-   */
-  function findChatTextarea() {
-    const selectors = [
-      'textarea[placeholder*="DeepSeek" i]',
-      'textarea[placeholder*="Message" i]',
-      'textarea[placeholder*="发消息" i]',
-      'textarea[placeholder*="发送" i]',
-      'textarea[placeholder*="输入" i]',
-      "textarea",
-    ];
+  function hasExtensionButton() {
+    return !!document.querySelector("." + EXTEND_BTN_CLASS);
+  }
 
-    for (const sel of selectors) {
+  function scheduleAfterHydration(fn) {
+    const run = () => {
+      if (typeof window.requestIdleCallback === "function") {
+        window.requestIdleCallback(fn, { timeout: IDLE_CALLBACK_TIMEOUT_MS });
+      } else {
+        fn();
+      }
+    };
+    window.setTimeout(run, HYDRATION_SETTLE_MS);
+  }
+
+  function debounceMutationObserver(fn, wait) {
+    return function onMutation() {
+      if (state.moDebounceTimer != null) {
+        clearTimeout(state.moDebounceTimer);
+      }
+      state.moDebounceTimer = window.setTimeout(() => {
+        state.moDebounceTimer = null;
+        fn();
+      }, wait);
+    };
+  }
+
+  function resolveAdapter() {
+    const host = window.location.hostname;
+    for (const key of Object.keys(siteAdapters)) {
+      const adapter = siteAdapters[key];
+      if (adapter.hostPattern.test(host)) return adapter;
+    }
+    return siteAdapters.deepseek;
+  }
+
+  function isEditorInput(el) {
+    if (!el || !(el instanceof HTMLElement)) return false;
+    if (el.closest("." + NS + "-wrapper")) return false;
+    if (el.getAttribute("aria-hidden") === "true") return false;
+    if (el instanceof HTMLTextAreaElement) return true;
+    return el.isContentEditable || el.getAttribute("contenteditable") === "true";
+  }
+
+  function findSiteInput(adapter) {
+    for (const sel of adapter.selectors.input) {
       const nodes = document.querySelectorAll(sel);
       for (const node of nodes) {
-        if (!(node instanceof HTMLTextAreaElement)) continue;
-        // Prefer large, visible chat inputs near the bottom of the viewport
+        if (!isEditorInput(node)) continue;
         if (!isVisible(node) && node.offsetParent === null) continue;
-        if (node.closest("." + NS + "-wrapper")) continue;
-        if (node.getAttribute("aria-hidden") === "true") continue;
-        // Heuristic: chat box is usually near the bottom
         const rect = node.getBoundingClientRect();
-        if (rect.top > window.innerHeight * 0.35 || nodes.length === 1) {
+        if (rect.top > window.innerHeight * 0.3 || nodes.length === 1) {
           return node;
         }
       }
     }
 
-    // Last resort: largest visible textarea
+    // Last resort: largest visible editable element
     let best = null;
     let bestArea = 0;
-    document.querySelectorAll("textarea").forEach((ta) => {
-      if (ta.closest("." + NS + "-wrapper")) return;
-      const r = ta.getBoundingClientRect();
+    const candidates = document.querySelectorAll('textarea, [contenteditable="true"]');
+    candidates.forEach((node) => {
+      if (!isEditorInput(node)) return;
+      const r = node.getBoundingClientRect();
       const area = r.width * r.height;
       if (area > bestArea) {
         bestArea = area;
-        best = ta;
+        best = node;
       }
     });
     return best;
   }
 
   /**
-   * Walk up from the textarea to a sensible input "shell" container.
+   * Walk up from the input to a sensible shell container.
+   * Does NOT mutate host styles (avoids hydration / layout conflicts).
    */
-  function findInputContainer(textarea) {
-    if (!textarea) return null;
+  function findInputContainer(input, adapter) {
+    if (!input) return null;
 
-    let el = textarea.parentElement;
-    let best = textarea.parentElement;
+    for (const sel of adapter.selectors.container || []) {
+      const matched = input.closest(sel);
+      if (matched instanceof HTMLElement) return matched;
+    }
+
+    let el = input.parentElement;
+    let best = input.parentElement;
     let depth = 0;
 
     while (el && el !== document.body && depth < 8) {
@@ -135,10 +325,7 @@
         style.boxShadow !== "none" ||
         style.backgroundColor !== "rgba(0, 0, 0, 0)";
 
-      // Prefer a relatively tight wrapper that still contains action buttons
-      const buttons = el.querySelectorAll(
-        'button, [role="button"], .ds-button, .ds-icon-button'
-      );
+      const buttons = el.querySelectorAll('button, [role="button"]');
       if (hasBorder && buttons.length > 0) {
         best = el;
         break;
@@ -150,29 +337,24 @@
       depth++;
     }
 
-    // Ensure we can position the expand button
-    if (best && window.getComputedStyle(best).position === "static") {
-      best.style.position = "relative";
-    }
     return best;
   }
 
   /**
    * Find the native send control near the textarea.
    */
-  function findNativeSubmitButton(textarea) {
-    if (!textarea) return null;
+  function findNativeSubmitButton(input, adapter) {
+    if (!input) return null;
 
     // Walk ancestors looking for an icon / send button
-    let root = textarea.parentElement;
+    let root = input.parentElement;
     for (let d = 0; d < 6 && root; d++) {
-      const candidates = Array.from(
-        root.querySelectorAll('button, [role="button"], .ds-button, .ds-icon-button')
-      );
+      const candidates = Array.from(root.querySelectorAll(adapter.selectors.submit.join(", ")));
 
       // Prefer the rightmost / bottommost interactive control that isn't our UI
       const filtered = candidates.filter((btn) => {
         if (btn.closest("." + NS + "-wrapper")) return false;
+        if (btn.classList.contains(EXTEND_BTN_CLASS)) return false;
         if (btn.classList.contains(NS + "-expand-btn")) return false;
         if (!isVisible(btn)) return false;
         const aria = (btn.getAttribute("aria-label") || "").toLowerCase();
@@ -191,6 +373,7 @@
           const s =
             ((btn.getAttribute("aria-label") || "") +
               (btn.getAttribute("title") || "") +
+              (btn.getAttribute("data-testid") || "") +
               (btn.textContent || "")).toLowerCase();
           return /send|submit|发送|发送消息/.test(s);
         });
@@ -210,29 +393,94 @@
     return null;
   }
 
+  function getNativeInputValue(input) {
+    if (!input) return "";
+    if (input instanceof HTMLTextAreaElement) return input.value || "";
+    if (input instanceof HTMLInputElement) return input.value || "";
+    if (input.isContentEditable) return input.textContent || "";
+    return "";
+  }
+
   /**
-   * Sync text into DeepSeek's React-controlled textarea.
+   * High-compat sync for textarea / input (React-style controlled components).
    */
-  function setNativeTextareaValue(textarea, value) {
-    const setter = Object.getOwnPropertyDescriptor(
-      window.HTMLTextAreaElement.prototype,
-      "value"
-    )?.set;
-    if (setter) {
-      setter.call(textarea, value);
-    } else {
-      textarea.value = value;
-    }
+  function syncTextareaLikeValue(input, value) {
+    const proto =
+      input instanceof HTMLTextAreaElement
+        ? window.HTMLTextAreaElement.prototype
+        : window.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+    if (setter) setter.call(input, value);
+    else input.value = value;
 
-    textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    textarea.dispatchEvent(new Event("change", { bubbles: true }));
-
-    // Some frameworks listen on keyboard events after programmatic fills
     try {
-      const tracker = textarea._valueTracker;
+      const tracker = input._valueTracker;
       if (tracker) tracker.setValue("");
     } catch (_) {
       /* ignore */
+    }
+
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: value, inputType: "insertText" }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keyup", { key: "Process", bubbles: true }));
+  }
+
+  /**
+   * High-compat sync for contenteditable (Claude / ChatGPT ProseMirror).
+   * Prefer execCommand insertText so ProseMirror state updates correctly.
+   */
+  function syncContentEditableValue(input, value) {
+    input.focus();
+
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(input);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } catch (_) {
+      /* ignore selection failure */
+    }
+
+    let inserted = false;
+    try {
+      document.execCommand("selectAll", false, null);
+      inserted = document.execCommand("insertText", false, value);
+    } catch (_) {
+      inserted = false;
+    }
+
+    if (!inserted) {
+      input.textContent = value;
+    }
+
+    input.dispatchEvent(
+      new InputEvent("beforeinput", {
+        bubbles: true,
+        cancelable: true,
+        inputType: "insertText",
+        data: value,
+      })
+    );
+    input.dispatchEvent(
+      new InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: value,
+      })
+    );
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keyup", { key: "Process", bubbles: true }));
+  }
+
+  function syncNativeInputValue(input, value) {
+    if (!input) return;
+    if (input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement) {
+      syncTextareaLikeValue(input, value);
+      return;
+    }
+    if (input.isContentEditable || input.getAttribute("contenteditable") === "true") {
+      syncContentEditableValue(input, value);
     }
   }
 
@@ -376,9 +624,10 @@
   function createExpandButton() {
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = NS + "-expand-btn";
+    btn.className = EXTEND_BTN_CLASS + " " + NS + "-expand-btn";
     btn.title = "Open Markdown editor";
     btn.setAttribute("aria-label", "Open Markdown editor");
+    btn.setAttribute("data-" + NS, "expand");
     btn.innerHTML =
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
       '<path d="M8 3H5a2 2 0 0 0-2 2v3"/>' +
@@ -539,25 +788,28 @@
   /* ─── open / close / submit ─── */
 
   function openEditor() {
-    if (!state.wrapper || !state.originalTextarea || !state.originalContainer) return;
+    if (!state.wrapper || !state.originalInput || !state.originalContainer) return;
 
     // Seed from native value
-    state.customTextarea.value = state.originalTextarea.value || "";
+    state.customTextarea.value = getNativeInputValue(state.originalInput);
     updateSubmitEnabled();
     updatePreview();
 
     // Measure again in case layout changed
-    const h = state.originalTextarea.getBoundingClientRect().height || state.originalHeight || 60;
+    const h = state.originalInput.getBoundingClientRect().height || state.originalHeight || 60;
     const minH = Math.max(Math.round(h * HEIGHT_MULTIPLIER), 180);
     state.customTextarea.style.minHeight = minH + "px";
     state.preview.style.minHeight = minH + "px";
+
+    state.wrapper.style.width = "";
+    state.wrapper.style.maxWidth = "";
 
     state.wrapper.classList.add("is-open");
     state.expandBtn?.classList.add("is-active");
     state.isOpen = true;
 
-    // Hide original input row (but keep wrapper mounted so we can still find submit)
     hideOriginalInput(true);
+    positionExpandButton();
 
     // Focus custom editor
     requestAnimationFrame(() => {
@@ -570,8 +822,8 @@
   function closeEditor(syncBack) {
     if (!state.wrapper) return;
 
-    if (syncBack && state.customTextarea && state.originalTextarea) {
-      setNativeTextareaValue(state.originalTextarea, state.customTextarea.value);
+    if (syncBack && state.customTextarea && state.originalInput) {
+      syncNativeInputValue(state.originalInput, state.customTextarea.value);
     }
 
     state.wrapper.classList.remove("is-open");
@@ -591,20 +843,20 @@
   }
 
   function hideOriginalInput(hide) {
-    const ta = state.originalTextarea;
+    const ta = state.originalInput;
     const container = state.originalContainer;
     if (!ta || !container) return;
 
-    // Prefer hiding only the textarea + typical sibling action row visuals
-    // while leaving our expand button visible.
     if (hide) {
-      // Hide original input shell / action rows; keep expand button visible
       Array.from(container.children).forEach((child) => {
-        if (child === state.wrapper || child === state.expandBtn) return;
+        if (child === state.hostRoot) return;
+        if (child.classList.contains(EXTEND_BTN_CLASS)) return;
         if (child.classList.contains(NS + "-expand-btn")) return;
         child.classList.add(NS + "-hide-original");
       });
-      ta.classList.add(NS + "-hide-original");
+      if (!ta.classList.contains(EXTEND_BTN_CLASS)) {
+        ta.classList.add(NS + "-hide-original");
+      }
     } else {
       container.querySelectorAll("." + NS + "-hide-original").forEach((el) => {
         el.classList.remove(NS + "-hide-original");
@@ -614,25 +866,20 @@
   }
 
   function submitMessage() {
-    if (!state.customTextarea || !state.originalTextarea) return;
+    if (!state.customTextarea || !state.originalInput) return;
     const text = state.customTextarea.value;
     if (!text.trim()) return;
 
-    // 1) Copy into native textarea with React-compatible events
-    setNativeTextareaValue(state.originalTextarea, text);
-
-    // 2) Reveal native UI briefly so submit button is clickable / visible
+    syncNativeInputValue(state.originalInput, text);
     hideOriginalInput(false);
 
-    // 3) Click native submit
-    const nativeBtn = findNativeSubmitButton(state.originalTextarea);
+    const nativeBtn = findNativeSubmitButton(state.originalInput, state.adapter);
     const clickSend = () => {
       if (nativeBtn) {
         nativeBtn.click();
       } else {
-        // Fallback: synthesize Enter on the native textarea (DeepSeek default send)
-        state.originalTextarea.focus();
-        state.originalTextarea.dispatchEvent(
+        state.originalInput.focus();
+        state.originalInput.dispatchEvent(
           new KeyboardEvent("keydown", {
             key: "Enter",
             code: "Enter",
@@ -643,75 +890,160 @@
       }
     };
 
-    // Allow React to process the value before clicking
     requestAnimationFrame(() => {
       clickSend();
-      // 4) Tear down custom editor
       state.customTextarea.value = "";
       if (state.preview) state.preview.innerHTML = "";
       closeEditor(false);
     });
   }
 
-  /* ─── injection / lifecycle ─── */
+  /* ─── safe injection / lifecycle ─── */
 
-  function injectUI(textarea) {
-    if (!textarea || textarea.dataset[NS + "Bound"]) return false;
+  function positionExpandButton() {
+    const btn = state.expandBtn;
+    const container = state.originalContainer;
+    if (!btn || !container || !container.isConnected) return;
 
-    const container = findInputContainer(textarea);
+    const rect = container.getBoundingClientRect();
+    const size = 30;
+    const gap = 8;
+
+    if (rect.width <= 0 || rect.height <= 0) {
+      btn.style.display = "none";
+      return;
+    }
+
+    btn.style.display = "";
+    btn.style.top = Math.round(rect.top + gap) + "px";
+    btn.style.left = Math.round(rect.right - size - gap) + "px";
+  }
+
+  function startLayoutSync() {
+    if (state.layoutSyncActive) return;
+    state.layoutSyncActive = true;
+    state.onLayoutSync = () => positionExpandButton();
+    window.addEventListener("scroll", state.onLayoutSync, true);
+    window.addEventListener("resize", state.onLayoutSync);
+  }
+
+  function stopLayoutSync() {
+    if (!state.layoutSyncActive || !state.onLayoutSync) return;
+    window.removeEventListener("scroll", state.onLayoutSync, true);
+    window.removeEventListener("resize", state.onLayoutSync);
+    state.layoutSyncActive = false;
+    state.onLayoutSync = null;
+  }
+
+  /**
+   * Host root is a sibling AFTER the native container — never inside React's input tree.
+   */
+  function ensureHostRoot(container) {
+    if (!container?.parentElement) return null;
+
+    const parent = container.parentElement;
+    let host = container.nextElementSibling;
+    if (host instanceof HTMLElement && host.classList.contains(NS + "-host")) {
+      return host;
+    }
+
+    host = document.createElement("div");
+    host.className = NS + "-host";
+    host.setAttribute("data-" + NS, "host");
+    parent.insertBefore(host, container.nextSibling);
+    return host;
+  }
+
+  function injectUI(input, adapter) {
+    if (!input || state.isInjecting) return false;
+
+    // Idempotent: skip if our button already exists anywhere in the document
+    if (hasExtensionButton() && state.expandBtn?.isConnected) return true;
+    if (hasExtensionButton()) {
+      const orphan = document.querySelector("." + EXTEND_BTN_CLASS);
+      if (orphan && orphan !== state.expandBtn) orphan.remove();
+    }
+
+    const container = findInputContainer(input, adapter);
     if (!container) return false;
 
-    // Avoid double-inject
-    if (container.querySelector("." + NS + "-wrapper")) {
-      textarea.dataset[NS + "Bound"] = "1";
+    const host = ensureHostRoot(container);
+    if (!host) return false;
+
+    // Editor already mounted for this host
+    if (host.querySelector("." + NS + "-wrapper") && state.expandBtn?.isConnected) {
+      boundInputs.add(input);
+      state.originalInput = input;
+      state.originalContainer = container;
+      state.adapter = adapter;
+      state.hostRoot = host;
+      positionExpandButton();
       return true;
     }
 
-    state.originalTextarea = textarea;
-    state.originalContainer = container;
-    state.originalHeight = textarea.getBoundingClientRect().height || 60;
+    state.isInjecting = true;
+    try {
+      state.originalInput = input;
+      state.originalContainer = container;
+      state.adapter = adapter;
+      state.hostRoot = host;
+      state.originalHeight = input.getBoundingClientRect().height || 60;
 
-    const expandBtn = createExpandButton();
-    const built = createEditorWrapper(state.originalHeight);
+      const expandBtn = createExpandButton();
+      const built = createEditorWrapper(state.originalHeight);
 
-    state.expandBtn = expandBtn;
-    state.wrapper = built.wrapper;
-    state.customTextarea = built.textarea;
-    state.preview = built.preview;
-    state.submitBtn = built.submitBtn;
+      state.expandBtn = expandBtn;
+      state.wrapper = built.wrapper;
+      state.customTextarea = built.textarea;
+      state.preview = built.preview;
+      state.submitBtn = built.submitBtn;
 
-    // Mount expand button on the original container (top-right)
-    container.appendChild(expandBtn);
+      // Float button on <body> — fully outside React-managed subtrees
+      document.body.appendChild(expandBtn);
+      host.appendChild(built.wrapper);
 
-    // Mount editor after the input container
-    if (container.parentElement) {
-      container.parentElement.insertBefore(built.wrapper, container.nextSibling);
-    } else {
-      container.appendChild(built.wrapper);
+      boundInputs.add(input);
+      startLayoutSync();
+      positionExpandButton();
+      updateSubmitEnabled();
+      return true;
+    } finally {
+      state.isInjecting = false;
     }
-
-    textarea.dataset[NS + "Bound"] = "1";
-    updateSubmitEnabled();
-    return true;
   }
 
-  function tryInit() {
-    // Re-bind if SPA navigated away and recreated the input
-    if (state.originalTextarea && !state.originalTextarea.isConnected) {
-      teardown();
+  function tryInject() {
+    if (state.isInjecting || state.isOpen) return false;
+
+    // Stale binding after SPA destroyed the composer
+    if (state.originalInput && !state.originalInput.isConnected) {
+      teardownUI(false);
     }
 
-    const ta = findChatTextarea();
-    if (!ta) return false;
-    return injectUI(ta);
+    if (hasExtensionButton() && state.expandBtn?.isConnected && state.originalInput?.isConnected) {
+      positionExpandButton();
+      return true;
+    }
+
+    const adapter = state.adapter || resolveAdapter();
+    const input = findSiteInput(adapter);
+    if (!input) return false;
+
+    return injectUI(input, adapter);
   }
 
-  function teardown() {
+  function teardownUI(removeHost) {
     if (state.debounceTimer != null) clearTimeout(state.debounceTimer);
-    state.wrapper?.remove();
+    stopLayoutSync();
     state.expandBtn?.remove();
-    state.originalTextarea = null;
+    if (removeHost !== false) {
+      state.hostRoot?.remove();
+    } else if (state.wrapper) {
+      state.wrapper.remove();
+    }
+    state.originalInput = null;
     state.originalContainer = null;
+    state.hostRoot = null;
     state.expandBtn = null;
     state.wrapper = null;
     state.customTextarea = null;
@@ -721,40 +1053,55 @@
     state.debounceTimer = null;
   }
 
-  function start() {
-    ensureKatexStyles();
+  function onDomMutation() {
+    if (state.isInjecting) return;
 
-    let attempts = 0;
+    if (state.originalInput && !state.originalInput.isConnected) {
+      teardownUI(false);
+    }
 
-    const boot = () => {
-      if (tryInit()) return;
-      attempts++;
-      if (attempts < MAX_INIT_ATTEMPTS) {
-        setTimeout(boot, INIT_RETRY_MS);
-      }
-    };
+    if (!hasExtensionButton() || !state.expandBtn?.isConnected) {
+      tryInject();
+      return;
+    }
 
-    boot();
+    if (state.originalInput && !state.originalInput.isConnected) {
+      teardownUI(false);
+      tryInject();
+      return;
+    }
 
-    // DeepSeek is an SPA — re-inject when the chat shell re-renders
-    state.observer = new MutationObserver(() => {
-      if (!document.querySelector("." + NS + "-wrapper")) {
-        tryInit();
-      } else if (state.originalTextarea && !state.originalTextarea.isConnected) {
-        teardown();
-        tryInit();
-      }
-    });
+    positionExpandButton();
+  }
 
-    state.observer.observe(document.documentElement, {
+  function startMutationObserver() {
+    if (state.observer) return;
+
+    const handler = debounceMutationObserver(onDomMutation, MO_DEBOUNCE_MS);
+    state.observer = new MutationObserver(handler);
+
+    const root = document.body || document.documentElement;
+    state.observer.observe(root, {
       childList: true,
       subtree: true,
+    });
+
+    handler();
+  }
+
+  function init() {
+    ensureKatexStyles();
+    state.adapter = resolveAdapter();
+
+    scheduleAfterHydration(() => {
+      tryInject();
+      startMutationObserver();
     });
   }
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", start);
+    document.addEventListener("DOMContentLoaded", init, { once: true });
   } else {
-    start();
+    init();
   }
 })();
