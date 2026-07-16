@@ -198,6 +198,9 @@
         buttonPlacement: "outside-right",
         buttonGap: 6,
         editorMinHeight: 360,
+        // Empty Gemini composer shows mic, not send — never click unlabeled buttons
+        submitRequireLabeled: true,
+        submitPreferEnter: true,
       },
       selectors: {
         input: [
@@ -216,12 +219,15 @@
         ],
         submit: [
           'button[aria-label*="Send message" i]',
+          'button[aria-label*="发送消息" i]',
+          'button[aria-label*="Send prompt" i]',
           'button[aria-label*="Send" i]',
           'button[aria-label*="发送" i]',
           'button[mattooltip*="Send" i]',
           'button[data-tooltip*="Send" i]',
+          "button.send-button",
+          ".send-button button",
           ".send-button",
-          "button",
         ],
       },
     },
@@ -411,45 +417,86 @@
   }
 
   /**
+   * Fingerprint for mic / upload / other non-send controls (esp. Gemini).
+   */
+  function controlFingerprint(btn) {
+    if (!btn) return "";
+    return [
+      btn.getAttribute("aria-label"),
+      btn.getAttribute("title"),
+      btn.getAttribute("mattooltip"),
+      btn.getAttribute("data-tooltip"),
+      btn.getAttribute("data-testid"),
+      btn.getAttribute("data-test-id"),
+      btn.className,
+      btn.id,
+      btn.innerHTML,
+    ]
+      .join(" ")
+      .toLowerCase();
+  }
+
+  function isNonSendControl(btn) {
+    const fp = controlFingerprint(btn);
+    if (
+      /stop|cancel|upload|attach|file|image|voice|mic|microphone|speech|dictation|录音|语音|麦克风|搜索|上传|停止|plus|toolbox|fullscreen|lens|camera/.test(
+        fp
+      )
+    ) {
+      return true;
+    }
+    if (
+      btn.closest(
+        ".speech-dictation-mic-button, .speech_dictation_mic_button, .gem-mic-button-wrapper, [class*='mic-button'], [class*='speech']"
+      )
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  function isLabeledSendControl(btn) {
+    if (!btn || isNonSendControl(btn)) return false;
+    const fp = controlFingerprint(btn);
+    return /send(\s|$|message|prompt)|submit|发送/.test(fp);
+  }
+
+  /**
    * Find the native send control near the textarea.
    */
   function findNativeSubmitButton(input, adapter) {
     if (!input) return null;
 
+    const requireLabeled =
+      !!adapter?.layout?.submitRequireLabeled || adapter?.id === "gemini";
+
     // Walk ancestors looking for an icon / send button
     let root = input.parentElement;
-    for (let d = 0; d < 6 && root; d++) {
-      const candidates = Array.from(root.querySelectorAll(adapter.selectors.submit.join(", ")));
+    for (let d = 0; d < 8 && root; d++) {
+      const sel = (adapter.selectors.submit || []).join(", ");
+      if (!sel) break;
+      const candidates = Array.from(root.querySelectorAll(sel));
 
-      // Prefer the rightmost / bottommost interactive control that isn't our UI
       const filtered = candidates.filter((btn) => {
         if (btn.closest("." + NS + "-wrapper")) return false;
         if (btn.classList.contains(EXTEND_BTN_CLASS)) return false;
         if (btn.classList.contains(NS + "-expand-btn")) return false;
         if (!isVisible(btn)) return false;
-        const aria = (btn.getAttribute("aria-label") || "").toLowerCase();
-        const title = (btn.getAttribute("title") || "").toLowerCase();
-        const text = (btn.textContent || "").trim().toLowerCase();
-        // Skip obvious non-send controls
-        if (/stop|cancel|upload|attach|file|image|voice|mic|搜索|上传|停止/.test(aria + title + text)) {
-          return false;
-        }
+        if (btn.disabled || btn.getAttribute("aria-disabled") === "true") return false;
+        if (isNonSendControl(btn)) return false;
         return true;
       });
 
       if (filtered.length) {
-        // Prefer elements with send-like labels, else last child (usually send)
-        const labeled = filtered.find((btn) => {
-          const s =
-            ((btn.getAttribute("aria-label") || "") +
-              (btn.getAttribute("title") || "") +
-              (btn.getAttribute("data-testid") || "") +
-              (btn.textContent || "")).toLowerCase();
-          return /send|submit|发送|发送消息/.test(s);
-        });
+        const labeled = filtered.find((btn) => isLabeledSendControl(btn));
         if (labeled) return labeled;
 
-        // Geometric heuristic: rightmost visible button in the container
+        // Gemini: never fall back to geometric rightmost (that is usually the mic)
+        if (requireLabeled) {
+          root = root.parentElement;
+          continue;
+        }
+
         filtered.sort((a, b) => {
           const ra = a.getBoundingClientRect();
           const rb = b.getBoundingClientRect();
@@ -461,6 +508,22 @@
     }
 
     return null;
+  }
+
+  function dispatchNativeEnter(input) {
+    if (!input) return;
+    input.focus();
+    const opts = {
+      key: "Enter",
+      code: "Enter",
+      keyCode: 13,
+      which: 13,
+      bubbles: true,
+      cancelable: true,
+    };
+    input.dispatchEvent(new KeyboardEvent("keydown", opts));
+    input.dispatchEvent(new KeyboardEvent("keypress", opts));
+    input.dispatchEvent(new KeyboardEvent("keyup", opts));
   }
 
   function getNativeInputValue(input) {
@@ -970,31 +1033,50 @@
     const text = state.customTextarea.value;
     if (!text.trim()) return;
 
+    const adapter = state.adapter;
+    const preferEnter = !!adapter?.layout?.submitPreferEnter || adapter?.id === "gemini";
+
+    // 1) Sync into native composer so Gemini swaps mic → send
     syncNativeInputValue(state.originalInput, text);
     hideOriginalInput(false);
 
-    const nativeBtn = findNativeSubmitButton(state.originalInput, state.adapter);
-    const clickSend = () => {
-      if (nativeBtn) {
-        nativeBtn.click();
-      } else {
-        state.originalInput.focus();
-        state.originalInput.dispatchEvent(
-          new KeyboardEvent("keydown", {
-            key: "Enter",
-            code: "Enter",
-            bubbles: true,
-            cancelable: true,
-          })
-        );
-      }
-    };
-
-    requestAnimationFrame(() => {
-      clickSend();
+    const finish = () => {
       state.customTextarea.value = "";
       if (state.preview) state.preview.innerHTML = "";
       closeEditor(false);
+    };
+
+    const clickSendOrEnter = () => {
+      const nativeBtn = findNativeSubmitButton(state.originalInput, adapter);
+      if (nativeBtn && isLabeledSendControl(nativeBtn)) {
+        nativeBtn.click();
+        return;
+      }
+      // Gemini empty-state mic is never a valid target — use Enter instead
+      if (preferEnter || !nativeBtn) {
+        dispatchNativeEnter(state.originalInput);
+        return;
+      }
+      // Non-Gemini unlabeled fallback (legacy sites)
+      nativeBtn.click();
+    };
+
+    // Give Angular/React a short window to show the real send button after text sync
+    let attempts = 0;
+    const maxAttempts = preferEnter ? 10 : 2;
+    const tick = () => {
+      attempts++;
+      const btn = findNativeSubmitButton(state.originalInput, adapter);
+      if ((btn && isLabeledSendControl(btn)) || attempts >= maxAttempts) {
+        clickSendOrEnter();
+        finish();
+        return;
+      }
+      window.setTimeout(tick, 50);
+    };
+
+    requestAnimationFrame(() => {
+      window.setTimeout(tick, 40);
     });
   }
 
